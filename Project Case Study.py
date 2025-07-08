@@ -3,6 +3,7 @@ MAIN.PY ---
 from dq_framework import DQFramework
 from utils.file_writer import save_as_csv, save_as_html
 from utils.email_sender import send_email
+from utils.load_data import load_csv_to_db
 import os
 
 def parse_config(file_path):
@@ -21,28 +22,50 @@ if __name__ == "__main__":
     config = parse_config("config/table_validation.txt")
     csv_path = config['csv_file'][0]
 
-    # Step 2: Run validation
+    # Step 2: Load data into SQLite
+    table_name_for_report = os.path.splitext(os.path.basename(csv_path))[0]
+    load_csv_to_db(csv_path=csv_path, table_name=table_name_for_report)
+
+    # Step 3: Run validation
     dq = DQFramework(csv_path)
     dq.null_check(config['null_check_columns'])
     dq.duplicate_check(config['duplicate_check_columns'])
+
+    if "custom_query_files" in config and "custom_query_table_names" in config:
+        custom_files = config["custom_query_files"]
+        custom_tables = config["custom_query_table_names"]
+
+        for hql_file, table_name in zip(custom_files, custom_tables):
+            dq.custom_query_check(
+                hql_file_path=hql_file,
+                table_name=table_name,
+                db_path="sample.db"
+            )
+        if custom_tables:
+            table_name_for_report = custom_tables[0]
+
+    # Step 4: Get results
     result_df = dq.get_results()
 
-    # Step 3: Save report
+    # Step 5: Save reports
     os.makedirs("output", exist_ok=True)
     save_as_csv(result_df)
-    html_path = save_as_html(result_df)
+    html_path = save_as_html(result_df, table_name=table_name_for_report)
 
-    # Step 4: Send Email
-    with open(html_path, 'r') as f:
-        html_content = f.read()
+    # Step 6: Send Email
+    if html_path:
+        with open(html_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
 
-    send_email(
-        subject="CSV DQ Validation Report",
-        body_html=html_content,
-        to_email="sanjaychauhancse00059@gmail.com",        # ✅ Replace this
-        from_email="thegouravgupta7@gmail.com",      # ✅ Replace this
-        password="quixapqteocsuceh"                  # ✅ Use Gmail App Password
-    )
+        send_email(
+            subject="CSV DQ Validation Report",
+            body_html=html_content,
+            to_email="thegouravgupta7@gmail.com",       # ✅ replace if needed
+            from_email="thegouravgupta7@gmail.com",           # ✅ replace if needed
+            password="***************"                       # ✅ your Gmail App password
+        )
+    else:
+        print("❌ No HTML report generated. Email not sent.")
 
 
 
@@ -53,7 +76,15 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-def send_email(subject, body_html, to_email, from_email="thegouravgupta7@gmail.com", password="quixapqteocsuceh", smtp_server="smtp.gmail.com", smtp_port=587):
+def send_email(
+    subject,
+    body_html,
+    to_email,
+    from_email="thegouravgupta7@gmail.com",
+    password="*************",
+    smtp_server="smtp.gmail.com",
+    smtp_port=587,
+):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = from_email
@@ -63,29 +94,49 @@ def send_email(subject, body_html, to_email, from_email="thegouravgupta7@gmail.c
     msg.attach(part)
 
     try:
-        server = smtplib.SMTP(smtp_server, smtp_port)
+        print("Connecting to SMTP...")
+        server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
         server.starttls()
+        print("Logging in...")
         server.login(from_email, password)
+        print("Sending email...")
         server.sendmail(from_email, to_email, msg.as_string())
         server.quit()
-        print("✅ Email sent successfully.")
+        print("✅ Email sent successfully!")
+        print(f"TO: {to_email}")
+        print(f"FROM: {from_email}")
+        print(f"SUBJECT: {subject}")
+        print(f"BODY SIZE: {len(body_html)} bytes")
     except Exception as e:
         print(f"❌ Failed to send email: {e}")
+
 
 
 FILE_WRITER.PY ---------
 
 import pandas as pd
+import time
 
 def save_as_csv(df, path="output/dq_report.csv"):
     df.to_csv(path, index=False)
-    print(f"Saved report to {path}")
-def save_as_html(df, path="output/dq_report.html"):
-    html = """
+    print(f"✅ Saved report to {path}")
+
+def save_as_html(df, table_name="Unknown", path="output/dq_report.html"):
+    timestamp = int(time.time())
+
+    html = f"""
     <html>
     <body>
-    <table border="1" cellspacing="0" cellpadding="5" style="border-collapse: collapse; font-family: Arial, sans-serif; font-size: 14px;">
-      <tr>
+      <h2 style="font-family: Arial, sans-serif; color: #333;">
+        Validation Framework Report
+      </h2>
+      <p style="font-family: Arial, sans-serif; font-size: 14px;">
+        <strong>Table Name:</strong> {table_name}<br>
+        <strong>Date:</strong> {timestamp}
+      </p>
+      <table border="1" cellspacing="0" cellpadding="5" 
+             style="border-collapse: collapse; font-family: Arial, sans-serif; font-size: 14px;">
+        <tr>
     """
 
     # Header
@@ -98,21 +149,28 @@ def save_as_html(df, path="output/dq_report.html"):
         html += "<tr>"
         for col in df.columns:
             val = row[col]
-
             if col == "Validation Result":
                 if val == "Pass":
-                    text_style = 'color: green; font-weight: bold;'
+                    cell_style = 'color: green; font-weight: bold;'
                 else:
-                    text_style = 'color: red; font-weight: bold;'
-                html += f'<td style="{text_style}">{val}</td>'
+                    cell_style = 'color: red; font-weight: bold;'
+                html += f'<td style="{cell_style}">{val}</td>'
             else:
                 html += f"<td>{val}</td>"
         html += "</tr>"
+
+    html += """
+      </table>
+    </body>
+    </html>
+    """
+
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
 
     print(f"✅ HTML report saved to {path}")
     return path
+
 
 
 
@@ -124,14 +182,19 @@ import os
 
 def load_csv_to_db(csv_path="data/employee.csv", db_path="sample.db", table_name="employee"):
     if not os.path.exists(csv_path):
-        print(f"CSV file not found at: {csv_path}")
-        return
+        print(f"❌ CSV file not found at: {csv_path}")
+        return False
 
-    df = pd.read_csv(csv_path)
-    conn = sqlite3.connect(db_path)
-    df.to_sql(table_name, conn, if_exists="replace", index=False)
-    conn.close()
-    print(f"✅ Loaded '{csv_path}' into '{db_path}' as table '{table_name}'.")
+    try:
+        df = pd.read_csv(csv_path)
+        conn = sqlite3.connect(db_path)
+        df.to_sql(table_name, conn, if_exists="replace", index=False)
+        conn.close()
+        print(f"✅ Loaded '{csv_path}' into '{db_path}' as table '{table_name}'.")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to load CSV into DB: {e}")
+        return False
 
 if __name__ == "__main__":
     load_csv_to_db()
@@ -139,9 +202,12 @@ if __name__ == "__main__":
 
 
 
+
 DQ_FRAMEWORK.PY  --------------------
 
 import pandas as pd
+import sqlite3
+import os
 
 class DQFramework:
     def __init__(self, csv_path):
@@ -168,8 +234,45 @@ class DQFramework:
             "True Value": count
         })
 
+    def custom_query_check(self, hql_file_path, table_name, db_path="sample.db"):
+        if not os.path.exists(hql_file_path):
+            print(f"❌ HQL file not found: {hql_file_path}")
+            self.results.append({
+                "Column": table_name,
+                "Check": "Custom Query Check",
+                "Validation Result": "Fail",
+                "True Value": "File Not Found"
+            })
+            return
+
+        with open(hql_file_path, "r") as f:
+            hql = f.read()
+
+        try:
+            conn = sqlite3.connect(db_path)
+            result = conn.execute(hql)
+            rows = result.fetchall()
+            count = len(rows)
+            conn.close()
+
+            self.results.append({
+                "Column": table_name,
+                "Check": "Custom Query Check",
+                "Validation Result": "Pass" if count == 0 else "Fail",
+                "True Value": count
+            })
+
+        except Exception as e:
+            self.results.append({
+                "Column": table_name,
+                "Check": "Custom Query Check",
+                "Validation Result": "Fail",
+                "True Value": str(e)
+            })
+
     def get_results(self):
         return pd.DataFrame(self.results)
+
 
 
 
@@ -207,8 +310,10 @@ CONFIG
 TABLE_VALIDATION.TXT
 
 csv_file: data/employee.csv
-null_check_columns: emp_id, name, department, email, salary
+null_check_columns: emp_id,name,department,email,salary
 duplicate_check_columns: emp_id
+custom_query_files: config/table_dq.hql
+custom_query_table_names: employee
 
 
 OUTPUT :
@@ -220,5 +325,4 @@ department,Null Check,Fail,1
 email,Null Check,Fail,4
 salary,Null Check,Fail,3
 emp_id,Duplicate Check,Fail,1
-
-
+employee,Custom Query Check,Pass,0
